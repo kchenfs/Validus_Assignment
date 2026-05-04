@@ -292,7 +292,15 @@ A VaR run passes through five stages in sequence:
 
 ### Component Walkthrough
 
-**1. Submit Lambda** — Receives the `POST /var-runs` request. Validates the portfolio exists and belongs to the authenticated client. Writes a `RUN#{run_id}|META` item to DynamoDB with `status=SUBMITTED`. Starts a Step Functions Standard Workflow execution with the `run_id` as input. Returns `202 Accepted` with the `run_id` and WebSocket URL — the SPA connects to the WebSocket immediately after to await the completion event.
+**1. Portfolios Lambda** *(FR-1 — Browse Portfolios)* — Serves `GET /portfolios`. Validates the Cognito JWT and extracts the `client_id`. Queries the existing SQL database for all portfolios belonging to that client and returns them with their `trade_count`. No new storage is introduced — this is a read-only pass-through to the existing schema.
+
+<p align="center">
+    <img src="./diagrams/var_fr1_portfolios.png" alt="FR-1 — Browse Portfolios" width="100%">
+    <br />
+    <em>FR-1 — Client authenticates, Portfolios Lambda queries SQL, returns portfolio list.</em>
+</p>
+
+**2. Submit Lambda** *(FR-2 — Submit VaR Run)* — Receives the `POST /var-runs` request. Validates the portfolio exists and belongs to the authenticated client. Writes a `RUN#{run_id}|META` item to DynamoDB with `status=SUBMITTED`. Starts a Step Functions Standard Workflow execution with the `run_id` as input. Returns `202 Accepted` with the `run_id` and WebSocket URL — the SPA connects to the WebSocket immediately after to await the completion event.
 
 <p align="center">
     <img src="./diagrams/var_phase1_submission.png" alt="Phase 1 — Job Submission" width="100%">
@@ -300,7 +308,7 @@ A VaR run passes through five stages in sequence:
     <em>Phase 1 — interactions between SPA, API Gateway, Submit Lambda, DynamoDB, and Step Functions on submission.</em>
 </p>
 
-**2. Step Functions (Standard Workflow)** — The orchestrator. A four-step state machine:
+**3. Step Functions (Standard Workflow)** *(FR-2 — Submit VaR Run)* — The orchestrator. A four-step state machine:
 
 <p align="center">
     <img src="./diagrams/var_step_functions_pipeline.png" alt="Step Functions Pipeline" width="100%">
@@ -340,7 +348,15 @@ A VaR run passes through five stages in sequence:
     <em>Phase 4 — Aggregator reads S3 results and writes final VaR to DynamoDB; Notify Lambda pushes to WebSocket and SES in parallel.</em>
 </p>
 
-**3. WebSocket connection management:** API Gateway WebSocket does not push messages automatically — the application must maintain a connection registry and call the `@connections` API explicitly. The lifecycle is:
+**4. Results Lambda** *(FR-4 — Review Results)* — Serves `GET /var-runs/{run_id}/results`. Validates the JWT, confirms the `run_id` belongs to the authenticated client, then reads the `RUN#{run_id}|META` item from DynamoDB with `ConsistentRead=true` (satisfying NFR-3 — the client must never see a stale result after receiving a completion notification). Returns the final VaR figures and a pre-signed S3 URL for the audit report.
+
+<p align="center">
+    <img src="./diagrams/var_fr4_results.png" alt="FR-4 — Review Results" width="100%">
+    <br />
+    <em>FR-4 — Client retrieves final VaR results; Results Lambda reads from DynamoDB with strong consistency.</em>
+</p>
+
+**5. WebSocket connection management** *(FR-3 — Notify on Completion)*: API Gateway WebSocket does not push messages automatically — the application must maintain a connection registry and call the `@connections` API explicitly. The lifecycle is:
 
 - **`$connect`** — API Gateway fires this route when the client opens a connection. A Connect Lambda records the `connectionId` (provided by API Gateway) in DynamoDB as `RUN#{run_id} | CONN#{connection_id}` with a 2-hour TTL. The `run_id` is passed as a query parameter on the WebSocket URL (`wss://ws.riskview.validus.com?run_id=run_7f3a9b`) so the association is captured at connect time without a separate subscribe message.
 - **Pushing events** — The Notify Lambda (Step 4) queries all `CONN#` items for the `run_id` (a `Query` on `PK = RUN#{run_id}` and `SK begins_with CONN#`), then calls `POST /@connections/{connectionId}` for each live connection via the API Gateway Management API.
@@ -583,3 +599,5 @@ With Fargate Spot, the compute cost drops to ~$3, bringing the total to ~$4/run.
 | Infrastructure as Code | AWS CDK | Declarative infrastructure with first-class constructs for all AWS services used in this design; type-safe and composable. |
 
 ---
+
+*This document was designed for the Validus Risk Management Platform Engineer technical assessment. All architectural decisions are grounded in AWS-native services and validated against published AWS reference architectures for serverless HPC batch workloads and VaR calculation.*
